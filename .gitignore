@@ -1,0 +1,9 @@
+# Cache — runtime файли, не комітимо
+cache/*.json
+cache/*.log
+
+# OS / editors
+Thumbs.db
+.DS_Store
+*.bak
+*.tmp
