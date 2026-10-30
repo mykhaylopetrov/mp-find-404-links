@@ -237,11 +237,27 @@ function renderResults(){
 }
 
 function toCsv(){
+  const esc = (v)=> String(v ?? '').replace(/"/g,'""');
   const rows = [['broken_url','http_code','anchor_text','source_pages']];
   for(const b of state.broken){
-    rows.push([b.url, b.code, (b.text||'').replace(/"/g,'""'), [...b.sources].join(' | ').replace(/"/g,'""')]);
+    rows.push([esc(b.url), b.code, esc(b.text||''), esc([...b.sources].join(' | '))]);
   }
   return rows.map(r=> r.map(v=>`"${v}"`).join(',')).join('\n');
+}
+
+function rowHpt(pairs){
+  // pairs: [[текст, ширинаКолонкиWch], ...] → висота рядка, щоб ВЕСЬ вміст було видно
+  // capacity із запасом 0.85 (пропорційний шрифт, кирилиця ширша) — краще трохи вищий рядок, ніж обрізаний текст
+  const estLines = (text, wch)=>{
+    const s = String(text ?? '');
+    const cap = Math.max(8, wch * 0.85);
+    let total = 0;
+    for(const seg of s.split('\n')) total += Math.max(1, Math.ceil(seg.length / cap));
+    return total;
+  };
+  let m = 1;
+  for(const [t, w] of pairs) m = Math.max(m, estLines(t, w));
+  return Math.min(409, Math.max(18, Math.round(m * 15))); // 15pt = рядок Calibri 11; 409 = ліміт Excel
 }
 
 function exportExcel(){
@@ -279,7 +295,7 @@ function exportExcel(){
         {wch: 60},
         {wch: 12},
       ];
-      ws['!freeze'] = { xSplit: 0, ySplit: 1 };
+      // NB: закріплення шапки (freeze panes) бібліотекою xlsx-js-style не пишеться — лишаємо autofilter
       ws['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:0,c:header.length-1}}) };
       const range = XLSX.utils.decode_range(ws['!ref']);
       for(let C=range.s.c; C<=range.e.c; ++C){
@@ -287,18 +303,35 @@ function exportExcel(){
         if(!ws[addr]) continue;
         ws[addr].s = {
           font:{ bold:true, color:{rgb:"FFFFFF"} },
-          fill:{ fgColor:{rgb:"2563EB"} },
+          fill:{ patternType:"solid", fgColor:{rgb:"2563EB"} },
           alignment:{ horizontal:"center", vertical:"center", wrapText:true }
         };
       }
       for(let R=1; R<=state.broken.length; ++R){
+        // Колонка B: бите посилання — клікабельний гіперлінк + червоний підкреслений
+        const addr2 = XLSX.utils.encode_cell({r:R,c:1});
+        if(ws[addr2]){
+          ws[addr2].l = { Target: ws[addr2].v };
+          ws[addr2].s = { font:{ color:{rgb:"B91C1C"}, underline:true }, alignment:{ vertical:"top", wrapText:true } };
+        }
+        // Колонка C: код — по центру, жирний червоний
+        const addrCode = XLSX.utils.encode_cell({r:R,c:2});
+        if(ws[addrCode]) ws[addrCode].s = { font:{ bold:true, color:{rgb:"B91C1C"} }, alignment:{ horizontal:"center", vertical:"top" } };
+        // Колонка D: анкор — wrap
+        const addrText = XLSX.utils.encode_cell({r:R,c:3});
+        if(ws[addrText]) ws[addrText].s = { alignment:{ vertical:"top", wrapText:true } };
+        // Колонка E: джерела (кілька URL через \n) — wrap, зверху
         const addr = XLSX.utils.encode_cell({r:R,c:4});
         if(ws[addr]) ws[addr].s = { alignment:{ vertical:"top", wrapText:true } };
-        const addr2 = XLSX.utils.encode_cell({r:R,c:1});
-        if(ws[addr2]) ws[addr2].s = { font:{ color:{rgb:"B91C1C"} }, alignment:{ wrapText:true } };
+        // Колонка F: кількість — по центру
+        const addrN = XLSX.utils.encode_cell({r:R,c:5});
+        if(ws[addrN]) ws[addrN].s = { alignment:{ horizontal:"center", vertical:"top" } };
       }
-      ws['!rows'] = [{hpt:22}];
-      for(let i=1;i<=state.broken.length;i++) ws['!rows'].push({hpt: 36});
+      ws['!rows'] = [{hpt: 32}];
+      // Автовисота кожного рядка під його вміст: URL (60), анкор (32), джерела (60)
+      state.broken.forEach((b)=>{
+        ws['!rows'].push({hpt: rowHpt([[b.url, 60], [b.text || '', 32], [[...b.sources].join('\n'), 60]])});
+      });
       XLSX.utils.book_append_sheet(wb, ws, '404 Links');
     } else {
       // placeholder sheet
@@ -329,7 +362,28 @@ function exportExcel(){
     ];
     const ws2 = XLSX.utils.aoa_to_sheet(summary);
     ws2['!cols'] = [{wch: 32},{wch:60}];
-    ws2['A1'].s = { font:{ bold:true, sz:14, color:{rgb:"0F172A"} } };
+    ws2['!merges'] = [{s:{r:0,c:0}, e:{r:0,c:1}}];
+    ws2['A1'].s = { font:{ bold:true, sz:14, color:{rgb:"0F172A"} }, alignment:{ vertical:"center" } };
+    // Автовисота рядків зведення під вміст колонки B (60)
+    ws2['!rows'] = [{hpt:26}];
+    for(let R=1; R<summary.length; ++R){
+      const vCell = XLSX.utils.encode_cell({r:R,c:1});
+      const h = (ws2[vCell] && ws2[vCell].v) ? rowHpt([[String(ws2[vCell].v), 60]]) : 15;
+      ws2['!rows'].push({hpt: h});
+    }
+    // Перша колонка (назви полів) — жирна, друга — з переносами + клікабельні URL
+    for(let R=1; R<summary.length; ++R){
+      const a = XLSX.utils.encode_cell({r:R,c:0});
+      const b = XLSX.utils.encode_cell({r:R,c:1});
+      if(ws2[a] && ws2[a].v) ws2[a].s = { font:{ bold:true, color:{rgb:"334155"} }, alignment:{ vertical:"top" } };
+      if(ws2[b] && ws2[b].v){
+        ws2[b].s = { alignment:{ vertical:"top", wrapText:true } };
+        if(/^https?:\/\//i.test(String(ws2[b].v))) {
+          ws2[b].l = { Target: String(ws2[b].v) };
+          ws2[b].s = { font:{ color:{rgb:"0563C1"}, underline:true }, alignment:{ vertical:"top", wrapText:true } };
+        }
+      }
+    }
     XLSX.utils.book_append_sheet(wb, ws2, 'Зведення');
 
     // Sheet 3: Не завантажені сторінки (з причиною)
@@ -355,7 +409,7 @@ function exportExcel(){
         {wch:10},
         {wch:20},
       ];
-      ws3['!freeze'] = { xSplit: 0, ySplit: 1 };
+      // NB: freeze panes не підтримується writer'ом — лишаємо autofilter
       ws3['!autofilter'] = { ref: XLSX.utils.encode_range({s:{r:0,c:0}, e:{r:0,c:hdr.length-1}}) };
       const range3 = XLSX.utils.decode_range(ws3['!ref']);
       for(let C=range3.s.c; C<=range3.e.c; ++C){
@@ -363,7 +417,7 @@ function exportExcel(){
         if(!ws3[addr]) continue;
         ws3[addr].s = {
           font:{ bold:true, color:{rgb:"FFFFFF"} },
-          fill:{ fgColor:{rgb:"B91C1C"} },
+          fill:{ patternType:"solid", fgColor:{rgb:"B91C1C"} },
           alignment:{ horizontal:"center", vertical:"center", wrapText:true }
         };
       }
@@ -372,33 +426,51 @@ function exportExcel(){
         const a = XLSX.utils.encode_cell({r:R,c:2});
         if(ws3[a]) ws3[a].s = { font:{ color:{rgb:"7F1D1D"} }, alignment:{ wrapText:true, vertical:"top" } };
         const b = XLSX.utils.encode_cell({r:R,c:1});
-        if(ws3[b]) ws3[b].s = { alignment:{ wrapText:true, vertical:"top" } };
+        if(ws3[b]){
+          ws3[b].l = { Target: String(ws3[b].v) };
+          ws3[b].s = { font:{ color:{rgb:"0563C1"}, underline:true }, alignment:{ wrapText:true, vertical:"top" } };
+        }
+        const c = XLSX.utils.encode_cell({r:R,c:3});
+        if(ws3[c]) ws3[c].s = { font:{ bold:true }, alignment:{ horizontal:"center", vertical:"top" } };
       }
-      ws3['!rows'] = [{hpt:22}];
-      for(let i=1;i<=state.failedPages.length;i++) ws3['!rows'].push({hpt:28});
+      ws3['!rows'] = [{hpt: 32}];
+      // Автовисота кожного рядка під його вміст: URL (70), причина (40)
+      state.failedPages.forEach((f)=>{
+        ws3['!rows'].push({hpt: rowHpt([[f.url, 70], [f.error || '', 40]])});
+      });
       XLSX.utils.book_append_sheet(wb, ws3, 'Не завантажені');
     }
 
     const fname = `404-links-${siteHost}-${now.toISOString().slice(0,10)}.xlsx`;
-    XLSX.writeFile(wb, fname);
+    XLSX.writeFile(wb, fname, { cellStyles:true });
     log(`Excel вивантажено: ${fname} (${state.broken.length} битих, ${state.failedPages.length} не завантажено)`, 'ok');
     return;
   }
 
-  // Fallback HTML xls
-  let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><style>td{vertical-align:top} th{background:#2563eb;color:#fff}</style></head><body>`;
-  html += `<h2>MP Find 404 Links — ${els.url.value} — ${dateStr}</h2>`;
-  html += `<p>Сторінок: ${state.pages.length} | Перевірено: ${state.scannedPages.length} | Не завантажено: ${state.failedPages.length} | Посилань: ${state.linksMap.size} | Битих 404: ${state.broken.length}</p>`;
-  html += `<h3>Биті посилання (404)</h3><table border="1" cellspacing="0" cellpadding="6"><thead><tr><th>№</th><th>Бите посилання</th><th>Код</th><th>Анкор</th><th>Знайдено на</th></tr></thead><tbody>`;
+  // Fallback HTML xls (коли CDN недоступний): повноцінний стилізований звіт
+  const escHtml = (v)=> String(v ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8"><!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>404 Links</x:Name><x:WorksheetOptions><x:FreezePanes/><x:SplitHorizontal>1</x:SplitHorizontal><x:TopRowBottomPane>1</x:TopRowBottomPane></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]--><style>
+  body{font-family:Calibri,Arial,sans-serif;font-size:11pt;color:#0f172a}
+  h2{font-size:15pt;color:#0f172a;margin:0 0 4px} p.meta{color:#475569;font-size:10pt;margin:0 0 12px}
+  h3{font-size:12pt;margin:16px 0 6px} table{border-collapse:collapse;width:100%}
+  th{background:#2563eb;color:#fff;font-weight:bold;text-align:center;vertical-align:middle;border:1px solid #1e40af;padding:8px}
+  td{vertical-align:top;border:1px solid #cbd5e1;padding:6px 8px;word-break:break-all}
+  td.c{text-align:center;white-space:nowrap} td.code{color:#b91c1c;font-weight:bold;text-align:center}
+  a{color:#0563c1} .note{background:#eff6ff;border:1px solid #dbeafe;padding:8px;font-size:10pt}
+  </style></head><body>`;
+  html += `<h2>MP Find 404 Links — ${escHtml(els.url.value)} — ${escHtml(dateStr)}</h2>`;
+  html += `<p class="meta">Сторінок: ${state.pages.length} | Перевірено: ${state.scannedPages.length} | Не завантажено: ${state.failedPages.length} | Посилань: ${state.linksMap.size} | Битих 404: ${state.broken.length}</p>`;
+  html += `<h3>Биті посилання (404)</h3><table cellspacing="0" cellpadding="6"><colgroup><col style="width:40px"><col style="width:420px"><col style="width:60px"><col style="width:220px"><col style="width:420px"></colgroup><thead><tr><th>№</th><th>Бите посилання</th><th>Код</th><th>Анкор</th><th>Знайдено на</th></tr></thead><tbody>`;
+  if(!state.broken.length) html += `<tr><td colspan="5" style="text-align:center;color:#15803d">✅ Битих посилань (404) не знайдено</td></tr>`;
   state.broken.forEach((b,i)=>{
-    const src = [...b.sources].join('<br>');
-    html += `<tr><td>${i+1}</td><td><a href="${b.url}">${b.url}</a></td><td style="color:#b91c1c;font-weight:bold">404</td><td>${(b.text||'').replace(/</g,'&lt;')}</td><td>${src}</td></tr>`;
+    const src = [...b.sources].map(s=>`<a href="${escHtml(s)}">${escHtml(s)}</a>`).join('<br>');
+    html += `<tr><td class="c">${i+1}</td><td><a href="${escHtml(b.url)}">${escHtml(b.url)}</a></td><td class="code">404</td><td>${escHtml(b.text||'')}</td><td>${src}</td></tr>`;
   });
   html += `</tbody></table>`;
   if(state.failedPages.length){
-    html += `<h3>Не завантажені сторінки</h3><table border="1" cellspacing="0" cellpadding="6"><thead><tr><th>№</th><th>URL</th><th>Причина</th><th>Код</th><th>Спроби</th></tr></thead><tbody>`;
+    html += `<h3>Не завантажені сторінки</h3><table cellspacing="0" cellpadding="6"><colgroup><col style="width:40px"><col style="width:480px"><col style="width:280px"><col style="width:60px"><col style="width:60px"></colgroup><thead><tr><th>№</th><th>URL</th><th>Причина</th><th>Код</th><th>Спроби</th></tr></thead><tbody>`;
     state.failedPages.forEach((f,i)=>{
-      html += `<tr><td>${i+1}</td><td>${f.url}</td><td>${(f.error||'').replace(/</g,'&lt;')}</td><td>${f.code||''}</td><td>${f.attempts}</td></tr>`;
+      html += `<tr><td class="c">${i+1}</td><td><a href="${escHtml(f.url)}">${escHtml(f.url)}</a></td><td>${escHtml(f.error||'')}</td><td class="c">${escHtml(f.code||'')}</td><td class="c">${escHtml(f.attempts)}</td></tr>`;
     });
     html += `</tbody></table>`;
   }
